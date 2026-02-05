@@ -1322,6 +1322,41 @@ def apply_more_quota(
         except Exception:
             pass
 
+    def _install_open_trap() -> None:
+        """Capture target=_blank / window.open navigations triggered by the apply button."""
+        try:
+            page.run_js(
+                """
+                try {
+                  window.__lc_opened_url = '';
+                  window.__lc_opened_at = 0;
+                  const _origOpen = window.open;
+                  window.open = function(url) {
+                    try {
+                      window.__lc_opened_url = String(url || '');
+                      window.__lc_opened_at = Date.now();
+                      // Prefer same-tab navigation in automation environments.
+                      if (url) location.href = url;
+                    } catch (e) {}
+                    try { return _origOpen.apply(this, arguments); } catch (e) { return null; }
+                  };
+                  return true;
+                } catch (e) {
+                  return false;
+                }
+                """,
+                timeout=3,
+            )
+        except Exception:
+            pass
+
+    def _consume_open_trap() -> str:
+        try:
+            v = page.run_js("try { return window.__lc_opened_url || ''; } catch (e) { return ''; }", timeout=2)
+            return str(v or "").strip()
+        except Exception:
+            return ""
+
     def _visible_dialog_count() -> int:
         try:
             js = """
@@ -1459,6 +1494,7 @@ def apply_more_quota(
         "text:\u7533\u8bf7\u66f4\u591a\u914d\u989d",  # 申请更多配额
         "text:\u7533\u8bf7\u914d\u989d",              # 申请配额
         "text:\u63d0\u989d",                          # 提额
+        "text:Request more quota",
         "text:Apply",
         "text:Quota",
         "text:Increase",
@@ -1472,6 +1508,7 @@ def apply_more_quota(
         # Last resort: scan visible clickable elements and click a best match.
         try:
             dialogs_before = _visible_dialog_count()
+            _install_open_trap()
             js_click = """
                 try {
                   const needles = [
@@ -1510,7 +1547,13 @@ def apply_more_quota(
                   const best = scored[0] || null;
                   if (!best) return { clicked: false, reason: 'no_match', sample: scored.slice(0,3) };
                   try { best.el.scrollIntoView({ block: 'center', inline: 'center' }); } catch (e) {}
-                  try { best.el.click(); } catch (e) { try { best.el.dispatchEvent(new MouseEvent('click', { bubbles: true })); } catch (e2) {} }
+                  // Click with a fuller mouse sequence to satisfy some UI libs.
+                  try { best.el.dispatchEvent(new MouseEvent('mousemove', { bubbles: true })); } catch (e) {}
+                  try { best.el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true })); } catch (e) {}
+                  try { best.el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true })); } catch (e) {}
+                  try { best.el.click(); } catch (e) {
+                    try { best.el.dispatchEvent(new MouseEvent('click', { bubbles: true })); } catch (e2) {}
+                  }
                   return { clicked: true, text: best.t, score: best.score, url: location.href };
                 } catch (e) {
                   return { clicked: false, error: String(e), url: location.href };
@@ -1537,6 +1580,7 @@ def apply_more_quota(
     if clicked_via_js:
         wait_for_page_stable(page, timeout=6)
     else:
+        _install_open_trap()
         # If the button is disabled, the UI believes there is no API key yet.
         # This can happen when we create the key via API but the SPA store is stale.
         if not _is_element_enabled(btn):
@@ -1561,6 +1605,10 @@ def apply_more_quota(
 
         dialogs_before = _visible_dialog_count()
         try:
+            try:
+                btn.run_js("try { this.scrollIntoView({block:'center',inline:'center'}); } catch(e) {}", timeout=2)
+            except Exception:
+                pass
             btn.click()
         except Exception:
             try:
@@ -1576,6 +1624,14 @@ def apply_more_quota(
     opened = False
     start = time.time()
     while time.time() - start < 20:
+        # If the click triggered a new tab / external navigation, follow it.
+        opened_url = _consume_open_trap()
+        if opened_url and opened_url.startswith("http"):
+            try:
+                page.get(opened_url)
+                wait_for_page_stable(page, timeout=15)
+            except Exception:
+                pass
         if _visible_dialog_count() > dialogs_before or _quota_form_visible():
             opened = True
             break

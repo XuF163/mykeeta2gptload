@@ -57,11 +57,13 @@ def init_browser(max_retries: int = BROWSER_MAX_RETRIES) -> ChromiumPage:
             co.set_argument("--disable-gpu")
             co.set_argument("--disable-dev-shm-usage")
             co.set_argument("--no-sandbox")
+            # Keep a consistent viewport across local + container runs; responsive layouts can
+            # hide important buttons (e.g. quota apply) on smaller screens.
+            co.set_argument("--window-size=1920,1080")
             co.auto_port()
 
             if BROWSER_HEADLESS:
                 co.set_argument("--headless=new")
-                co.set_argument("--window-size=1920,1080")
                 log.step("启动 Chrome (无头模式)...")
             else:
                 log.step("启动 Chrome (无痕模式)...")

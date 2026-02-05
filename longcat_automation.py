@@ -1305,6 +1305,23 @@ def apply_more_quota(
     industry = (industry or LONGCAT_QUOTA_INDUSTRY or "Internet").strip()
     scenario = (scenario or LONGCAT_QUOTA_SCENARIO or "Chatbot").strip()
 
+    def _scroll_nudge() -> None:
+        """Trigger lazy loads / avoid mobile-layout edge cases (common in small viewports)."""
+        try:
+            page.run_js(
+                """
+                try {
+                  window.scrollTo(0, 0);
+                  setTimeout(() => window.scrollTo(0, document.body.scrollHeight), 150);
+                  setTimeout(() => window.scrollTo(0, 0), 300);
+                  return true;
+                } catch (e) { return false; }
+                """,
+                timeout=3,
+            )
+        except Exception:
+            pass
+
     def _visible_dialog_count() -> int:
         try:
             js = """
@@ -1341,16 +1358,24 @@ def apply_more_quota(
                     const r = el.getBoundingClientRect();
                     return r && r.width > 0 && r.height > 0;
                   };
-                  const submitText = '\\u63d0\\u4ea4\\u7533\\u8bf7'; // submit application
-                  const scenarioNeedle = '\\u4f7f\\u7528\\u573a\\u666f'; // usage scenario
-                  const btn = Array.from(document.querySelectorAll('button'))
+                  const dialogs = Array.from(document.querySelectorAll('[role="dialog"],.ant-modal-content,.ant-modal,.modal')).filter(isVisible);
+                  const dlg = dialogs[0] || null;
+                  const scope = dlg || document;
+
+                  // Any visible form-like inputs inside a visible dialog counts as "opened".
+                  const hasInputs = Array.from(scope.querySelectorAll('textarea,input,select'))
                     .filter(isVisible)
-                    .find(b => ((b.innerText || '').trim().includes(submitText)));
-                  if (btn) return true;
-                  const ta = Array.from(document.querySelectorAll('textarea'))
+                    .some(el => ((el.getAttribute && (el.getAttribute('type') || '').toLowerCase()) !== 'hidden'));
+                  if (dlg && hasInputs) return true;
+
+                  // Fallback: visible primary/submit button in a dialog.
+                  const btn = Array.from(scope.querySelectorAll('button'))
                     .filter(isVisible)
-                    .find(t => ((t.getAttribute('placeholder') || '').includes(scenarioNeedle)));
-                  return !!ta;
+                    .find(b => {
+                      const t = (b.innerText || '').trim().toLowerCase();
+                      return t.includes('submit') || t.includes('apply') || t.includes('continue') || (b.innerText || '').includes('\\u63d0\\u4ea4');
+                    });
+                  return !!btn;
                 } catch (e) {
                   return false;
                 }
@@ -1403,6 +1428,7 @@ def apply_more_quota(
         try:
             page.get(url)
             wait_for_page_stable(page, timeout=10)
+            _scroll_nudge()
             if wait_for_element(page, "text:\u7533\u8bf7\u66f4\u591a\u989d\u5ea6", timeout=2) or wait_for_element(page, "text:Apply", timeout=2):
                 break
         except Exception:
@@ -1411,47 +1437,132 @@ def apply_more_quota(
     _debug_dump_quota(page, note="after_open_usage")
 
     # 2) Click "Apply more quota"
-    btn = wait_for_element(page, "text:\u7533\u8bf7\u66f4\u591a\u989d\u5ea6", timeout=10) or wait_for_element(page, "text:Apply", timeout=3)
+    _scroll_nudge()
+    btn = None
+    clicked_via_js = False
+    btn_text_selectors = [
+        "text:\u7533\u8bf7\u66f4\u591a\u989d\u5ea6",  # 申请更多额度
+        "text:\u7533\u8bf7\u66f4\u591a\u914d\u989d",  # 申请更多配额
+        "text:\u7533\u8bf7\u914d\u989d",              # 申请配额
+        "text:\u63d0\u989d",                          # 提额
+        "text:Apply",
+        "text:Quota",
+        "text:Increase",
+        "text:Request",
+    ]
+    for sel in btn_text_selectors:
+        btn = wait_for_element(page, sel, timeout=3)
+        if btn:
+            break
     if not btn:
-        return {"ok": False, "error": "apply button not found", "url": getattr(page, "url", "")}
-
-    # If the button is disabled, the UI believes there is no API key yet.
-    # This can happen when we create the key via API but the SPA store is stale.
-    if not _is_element_enabled(btn):
-        log.warning("Apply-more-quota button disabled; refreshing to wait for API key sync...")
-        for _ in range(3):
-            try:
-                page.refresh()
-            except Exception:
-                pass
-            wait_for_page_stable(page, timeout=10)
-            btn = wait_for_element(page, "text:\u7533\u8bf7\u66f4\u591a\u989d\u5ea6", timeout=5) or wait_for_element(page, "text:Apply", timeout=2)
-            if btn and _is_element_enabled(btn):
-                break
-        else:
-            return {
-                "ok": False,
-                "error": "apply button disabled (frontend thinks no API key yet)",
-                "url": getattr(page, "url", ""),
-            }
-
-    dialogs_before = _visible_dialog_count()
-    try:
-        btn.click()
-    except Exception:
+        # Last resort: scan visible clickable elements and click a best match.
         try:
-            btn.run_js("this.click()")
+            dialogs_before = _visible_dialog_count()
+            js_click = """
+                try {
+                  const needles = [
+                    'apply', 'quota', 'increase', 'request', 'more',
+                    '\\u7533\\u8bf7', '\\u914d\\u989d', '\\u989d\\u5ea6', '\\u63d0\\u989d'
+                  ];
+                  const isVisible = (el) => {
+                    if (!el) return false;
+                    const st = window.getComputedStyle(el);
+                    if (!st) return false;
+                    if (st.display === 'none' || st.visibility === 'hidden') return false;
+                    const r = el.getBoundingClientRect();
+                    return r && r.width > 0 && r.height > 0;
+                  };
+                  const textOf = (el) => ((el.innerText || el.textContent || '') + '').trim();
+                  const clickable = (el) => {
+                    const tag = (el.tagName || '').toLowerCase();
+                    if (tag === 'button' || tag === 'a') return true;
+                    const role = (el.getAttribute && el.getAttribute('role')) || '';
+                    if (role === 'button') return true;
+                    const cls = (el.className || '') + '';
+                    return cls.toLowerCase().includes('btn') || cls.toLowerCase().includes('button');
+                  };
+                  const els = Array.from(document.querySelectorAll('button,a,[role=\"button\"],div,span'))
+                    .filter(isVisible)
+                    .filter(clickable);
+                  const scored = els.map(el => {
+                    const t = textOf(el);
+                    const tl = t.toLowerCase();
+                    let score = 0;
+                    for (const n of needles) if (tl.includes(n)) score += (n.length >= 4 ? 3 : 1);
+                    if (tl.includes('apply') && tl.includes('quota')) score += 10;
+                    if (t.includes('\\u7533\\u8bf7') && (t.includes('\\u989d\\u5ea6') || t.includes('\\u914d\\u989d'))) score += 10;
+                    return { el, t: t.slice(0, 120), score };
+                  }).filter(x => x.score > 0).sort((a,b) => b.score - a.score);
+                  const best = scored[0] || null;
+                  if (!best) return { clicked: false, reason: 'no_match', sample: scored.slice(0,3) };
+                  try { best.el.scrollIntoView({ block: 'center', inline: 'center' }); } catch (e) {}
+                  try { best.el.click(); } catch (e) { try { best.el.dispatchEvent(new MouseEvent('click', { bubbles: true })); } catch (e2) {} }
+                  return { clicked: true, text: best.t, score: best.score, url: location.href };
+                } catch (e) {
+                  return { clicked: false, error: String(e), url: location.href };
+                }
+            """
+            r = page.run_js(js_click, timeout=6) or {}
+            wait_for_page_stable(page, timeout=4)
+            if isinstance(r, dict) and r.get("clicked"):
+                _debug_dump_quota(page, note=f"clicked_apply_js:{r.get('text','')[:40]}")
+                clicked_via_js = True
+            else:
+                _debug_dump_quota(page, note="apply_btn_not_found")
+                return {
+                    "ok": False,
+                    "error": f"apply button not found (js_scan={json.dumps(r, ensure_ascii=True)[:400]})",
+                    "url": getattr(page, "url", ""),
+                }
+        except Exception as e:
+            _debug_dump_quota(page, note="apply_btn_not_found_exception")
+            return {"ok": False, "error": f"apply button not found ({e})", "url": getattr(page, "url", "")}
+
+    # If we clicked via JS, we can't reliably read enabled/disabled state via a page element wrapper.
+    # We'll just proceed and detect whether the quota form opened.
+    if clicked_via_js:
+        wait_for_page_stable(page, timeout=4)
+    else:
+        # If the button is disabled, the UI believes there is no API key yet.
+        # This can happen when we create the key via API but the SPA store is stale.
+        if not _is_element_enabled(btn):
+            log.warning("Apply-more-quota button disabled; refreshing to wait for API key sync...")
+            for _ in range(3):
+                try:
+                    page.refresh()
+                except Exception:
+                    pass
+                wait_for_page_stable(page, timeout=10)
+                btn = wait_for_element(page, "text:\u7533\u8bf7\u66f4\u591a\u989d\u5ea6", timeout=5) or wait_for_element(
+                    page, "text:Apply", timeout=2
+                )
+                if btn and _is_element_enabled(btn):
+                    break
+            else:
+                return {
+                    "ok": False,
+                    "error": "apply button disabled (frontend thinks no API key yet)",
+                    "url": getattr(page, "url", ""),
+                }
+
+        dialogs_before = _visible_dialog_count()
+        try:
+            btn.click()
         except Exception:
-            return {"ok": False, "error": "apply button click failed", "url": getattr(page, "url", "")}
+            try:
+                btn.run_js("this.click()")
+            except Exception:
+                return {"ok": False, "error": "apply button click failed", "url": getattr(page, "url", "")}
 
     wait_for_page_stable(page, timeout=4)
     _debug_dump_quota(page, note="after_click_apply")
 
-    # The quota form should open in a modal/dialog; if not, we likely clicked a disabled button.
+    # The quota form should open in a modal/dialog; if not, we likely clicked the wrong element
+    # or the UI requires extra navigation in this environment.
     opened = False
     start = time.time()
     while time.time() - start < 8:
-        if _quota_form_visible():
+        if _visible_dialog_count() > dialogs_before or _quota_form_visible():
             opened = True
             break
         time.sleep(0.3)

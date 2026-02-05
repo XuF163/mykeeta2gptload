@@ -77,7 +77,8 @@ def _run_job_background() -> None:
         STATE.last_log_tail = ""
 
     # Run the job and capture output for /status.
-    cmd = ["sh", "-lc", "xvfb-run -a uv run python run.py"]
+    # Force a larger virtual screen so the site doesn't switch into a mobile layout.
+    cmd = ["sh", "-lc", "xvfb-run -a -s \"-screen 0 1920x1080x24\" uv run python run.py"]
     exit_code: int | None = None
     try:
         with open(log_path, "wb") as out:

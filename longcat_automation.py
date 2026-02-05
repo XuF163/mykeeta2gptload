@@ -1851,22 +1851,61 @@ def apply_more_quota(
               }}
             }} catch (e) {{}}
 
-            // Agree checkbox (must be checked). We locate it by nearby agreement text first,
-            // then fall back to the first checkbox in the form.
+            // Agree checkbox (must be checked).
+            // HF/container runs are often pickier about click targets, so we try:
+            //  1) agreement-text anchored search
+            //  2) click all checkboxes in the dialog/form scope
+            //  3) programmatically set checked=true + dispatch events (last resort)
             const agreeNeedle1 = '\\u7528\\u6237\\u534f\\u8bae'; // user agreement
             const agreeNeedle2 = '\\u9690\\u79c1\\u653f\\u7b56'; // privacy policy
+            const agreeNeedle3 = '\\u6211\\u5df2\\u9605\\u8bfb'; // I have read
+
+            let agreeDebug = {{
+              roleCount: 0,
+              inputCount: 0,
+              checkedCount: 0,
+              sample: []
+            }};
+
+            const clickIfPossible = (el) => {{
+              try {{
+                const tgt =
+                  (el.querySelector && (el.querySelector('.ant-checkbox-inner') || el.querySelector('.ant-checkbox') || el.querySelector('.checkbox') || el)) ||
+                  el;
+                if (tgt && tgt.click) tgt.click();
+              }} catch (e) {{}}
+            }};
+
+            const isCheckedAny = () => {{
+              try {{
+                const inputs = Array.from(scope.querySelectorAll('input[type=\"checkbox\"]'));
+                if (inputs.some((i) => !!i.checked)) return true;
+                if (scope.querySelector && scope.querySelector('.ant-checkbox-checked')) return true;
+                const roles = Array.from(scope.querySelectorAll('[role=\"checkbox\"]'));
+                if (roles.some((r) => ((r.getAttribute('aria-checked') || '').toLowerCase() === 'true'))) return true;
+              }} catch (e) {{}}
+              return false;
+            }};
 
             const findAgreementContainer = () => {{
               try {{
-                const all = Array.from(document.querySelectorAll('*')).filter(isVisible);
+                const all = Array.from(scope.querySelectorAll('*')).filter(isVisible);
                 const hit = all.find((el) => {{
                   const t = (el.innerText || '').trim();
                   if (!t) return false;
-                  return t.includes(agreeNeedle1) || t.includes(agreeNeedle2) || t.toLowerCase().includes('agree');
+                  const tl = t.toLowerCase();
+                  return (
+                    t.includes(agreeNeedle1) ||
+                    t.includes(agreeNeedle2) ||
+                    t.includes(agreeNeedle3) ||
+                    tl.includes('agree') ||
+                    tl.includes('privacy') ||
+                    tl.includes('terms')
+                  );
                 }});
                 if (!hit) return null;
                 let cur = hit;
-                for (let i = 0; i < 8 && cur; i += 1) {{
+                for (let i = 0; i < 10 && cur; i += 1) {{
                   if (cur.getAttribute && cur.getAttribute('role') === 'checkbox') return cur;
                   if (cur.querySelector && cur.querySelector('input[type=\"checkbox\"]')) return cur;
                   cur = cur.parentElement;
@@ -1877,45 +1916,67 @@ def apply_more_quota(
               }}
             }};
 
+            const markChecked = (cb) => {{
+              try {{
+                cb.checked = true;
+              }} catch (e) {{}}
+              try {{ cb.dispatchEvent(new Event('input', {{ bubbles: true }})); }} catch (e) {{}}
+              try {{ cb.dispatchEvent(new Event('change', {{ bubbles: true }})); }} catch (e) {{}}
+              try {{ cb.dispatchEvent(new MouseEvent('click', {{ bubbles: true }})); }} catch (e) {{}}
+            }};
+
+            // Nudge scroll so the checkbox area becomes visible.
+            try {{
+              const dlg = (findDialog && findDialog()) || null;
+              const body = dlg && dlg.querySelector ? (dlg.querySelector('.ant-modal-body') || dlg) : null;
+              if (body) body.scrollTop = 1e9;
+            }} catch (e) {{}}
+
             const agreeContainer = findAgreementContainer();
-            const clickIfPossible = (el) => {{
-              try {{
-                (el.querySelector && (el.querySelector('.ant-checkbox') || el.querySelector('.checkbox') || el))?.click?.();
-              }} catch (e) {{}}
-            }};
-
-            const isCheckboxChecked = (container) => {{
-              try {{
-                if (!container) return false;
-                const aria = ((container.getAttribute && container.getAttribute('aria-checked')) || '').toLowerCase();
-                if (aria === 'true') return true;
-                const cb = container.querySelector ? container.querySelector('input[type=\"checkbox\"]') : null;
-                if (cb && cb.checked) return true;
-                if (container.querySelector && container.querySelector('.ant-checkbox-checked')) return true;
-              }} catch (e) {{}}
-              return false;
-            }};
-
             if (agreeContainer) {{
-              if (!isCheckboxChecked(agreeContainer)) {{
-                clickIfPossible(agreeContainer);
-                await sleep(150);
-              }}
-              agreed = isCheckboxChecked(agreeContainer);
+              clickIfPossible(agreeContainer);
+              await sleep(150);
             }}
 
-            if (!agreed) {{
-              // Last-resort fallback: click the first checkbox input inside the modal scope.
-              try {{
-                const cbAny = Array.from(scope.querySelectorAll('input[type=\"checkbox\"]')).find(() => true) || null;
-                if (cbAny) {{
-                  const wrap = cbAny.closest ? (cbAny.closest('label') || cbAny.closest('div') || cbAny.parentElement) : null;
+            // Try clicking all checkboxes in scope.
+            try {{
+              const roleBoxes = Array.from(scope.querySelectorAll('[role=\"checkbox\"]')).filter(isVisible);
+              agreeDebug.roleCount = roleBoxes.length;
+              for (const r of roleBoxes.slice(0, 8)) {{
+                const aria = ((r.getAttribute && r.getAttribute('aria-checked')) || '').toLowerCase();
+                if (aria !== 'true') {{
+                  clickIfPossible(r);
+                  await sleep(120);
+                }}
+              }}
+            }} catch (e) {{}}
+
+            try {{
+              const inputs = Array.from(scope.querySelectorAll('input[type=\"checkbox\"]'));
+              agreeDebug.inputCount = inputs.length;
+              for (const cb of inputs.slice(0, 8)) {{
+                if (cb && !cb.checked) {{
+                  const wrap = cb.closest ? (cb.closest('label') || cb.closest('.ant-checkbox-wrapper') || cb.closest('div') || cb.parentElement) : cb.parentElement;
                   if (wrap) clickIfPossible(wrap);
                   await sleep(120);
-                  agreed = !!cbAny.checked;
+                  if (!cb.checked) markChecked(cb);
+                  await sleep(80);
                 }}
-              }} catch (e) {{}}
-            }}
+              }}
+            }} catch (e) {{}}
+
+            agreed = isCheckedAny();
+            try {{
+              const inputs2 = Array.from(scope.querySelectorAll('input[type=\"checkbox\"]'));
+              const checked2 = inputs2.filter((i) => !!i.checked).length;
+              agreeDebug.checkedCount = checked2;
+              const labels = Array.from(scope.querySelectorAll('label,span,div'))
+                .filter(isVisible)
+                .map((el) => ((el.innerText || '').trim()).slice(0, 90))
+                .filter((t) => t && (t.toLowerCase().includes('agree') || t.includes(agreeNeedle1) || t.includes(agreeNeedle2) || t.includes(agreeNeedle3)))
+                .slice(0, 4);
+              agreeDebug.sample = labels;
+            }} catch (e) {{}}
 
             await sleep(350);
 
@@ -1942,6 +2003,7 @@ def apply_more_quota(
               okIndustry,
               okScenario,
               agreed,
+              agreeDebug,
               submitted,
               submitDisabled,
               url: location.href
@@ -1968,6 +2030,13 @@ def apply_more_quota(
         if form_result.get("okScenario") is False:
             return {"ok": False, "error": "usage scenario field not found/filled", "form": form_result}
         if form_result.get("agreed") is False:
+            dbg = ""
+            try:
+                dbg = json.dumps(form_result.get("agreeDebug") or {}, ensure_ascii=True)[:400]
+            except Exception:
+                dbg = ""
+            if dbg:
+                return {"ok": False, "error": f"agreement checkbox not found/clicked (debug={dbg})", "form": form_result}
             return {"ok": False, "error": "agreement checkbox not found/clicked", "form": form_result}
         if form_result.get("submitDisabled") is True:
             return {

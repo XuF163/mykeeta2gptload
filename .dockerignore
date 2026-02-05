@@ -1,0 +1,20 @@
+.git
+.gitignore
+
+# local env / caches
+.venv
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# local runtime data
+temp/
+logs/
+
+# local config (mount from host / provide via secrets)
+config.toml
+
+# large reference data
+.ref/
+.ace-tool/

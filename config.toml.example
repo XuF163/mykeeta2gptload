@@ -1,0 +1,58 @@
+# ==================== LongCat Key Generator config.toml ====================
+#
+# Copy this file to config.toml and fill in your values.
+#
+# Focus:
+#   - MyKeeta Passport email OTP login (browser automation)
+#   - LongCat API key creation
+#   - Optional GPT-Load key auto-sync
+#
+# Important:
+# - GPTMail is the only supported email provider in this trimmed repo.
+# - Secrets/endpoints can be provided via environment variables (recommended for Docker):
+#     - GPTMAIL_API_KEY
+#     - GPT_LOAD_BASE_URL
+#     - GPT_LOAD_GROUP_NAME
+#     - GPT_LOAD_AUTH_KEY
+
+[gptmail]
+api_base = "https://mail.chatgpt.org.uk"
+api_key = ""
+prefix = ""
+domains = []
+
+[request]
+timeout = 30
+user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36"
+
+[verification]
+timeout = 60
+interval = 3
+max_retries = 20
+
+[browser]
+wait_timeout = 60
+short_wait = 10
+# Headless tends to be less stable for this flow; we run with Xvfb in Docker anyway.
+headless = false
+
+[longcat]
+passport_login_url = ""
+keys_count = 1
+keys_file = "temp/longcat_keys.txt"
+csv_path = "temp/longcat_keys.csv"
+apply_quota = true
+quota_industry = "Internet"
+quota_scenario = "Chatbot"
+
+[gpt_load]
+# Default to enabled. If auth_key is empty, the script will skip syncing.
+enabled = true
+base_url = "https://great429gptload.zeabur.app"
+group_name = "#pinhaofan"
+auth_key = ""
+force = false
+poll = true
+poll_timeout_s = 120
+poll_interval_s = 1
+# state_file = "temp/gpt_load_synced_pinhaofan.sha256"

@@ -1375,7 +1375,21 @@ def apply_more_quota(
                       const t = (b.innerText || '').trim().toLowerCase();
                       return t.includes('submit') || t.includes('apply') || t.includes('continue') || (b.innerText || '').includes('\\u63d0\\u4ea4');
                     });
-                  return !!btn;
+                  if (dlg && btn) return true;
+
+                  // Some variants render the quota form as a full page (no dialog).
+                  const pageInputs = Array.from(document.querySelectorAll('textarea,input,select'))
+                    .filter(isVisible)
+                    .filter(el => ((el.getAttribute && (el.getAttribute('type') || '').toLowerCase()) !== 'hidden'));
+                  const pageButtons = Array.from(document.querySelectorAll('button'))
+                    .filter(isVisible);
+                  const looksLikeQuotaForm =
+                    pageInputs.length >= 2 &&
+                    pageButtons.some(b => {
+                      const t = (b.innerText || '').trim().toLowerCase();
+                      return t.includes('submit') || (b.innerText || '').includes('\\u63d0\\u4ea4');
+                    });
+                  return !!looksLikeQuotaForm;
                 } catch (e) {
                   return false;
                 }
@@ -1427,7 +1441,7 @@ def apply_more_quota(
     for url in usage_urls:
         try:
             page.get(url)
-            wait_for_page_stable(page, timeout=10)
+            wait_for_page_stable(page, timeout=15)
             _scroll_nudge()
             if wait_for_element(page, "text:\u7533\u8bf7\u66f4\u591a\u989d\u5ea6", timeout=2) or wait_for_element(page, "text:Apply", timeout=2):
                 break
@@ -1451,7 +1465,7 @@ def apply_more_quota(
         "text:Request",
     ]
     for sel in btn_text_selectors:
-        btn = wait_for_element(page, sel, timeout=3)
+        btn = wait_for_element(page, sel, timeout=4)
         if btn:
             break
     if not btn:
@@ -1503,7 +1517,7 @@ def apply_more_quota(
                 }
             """
             r = page.run_js(js_click, timeout=6) or {}
-            wait_for_page_stable(page, timeout=4)
+            wait_for_page_stable(page, timeout=6)
             if isinstance(r, dict) and r.get("clicked"):
                 _debug_dump_quota(page, note=f"clicked_apply_js:{r.get('text','')[:40]}")
                 clicked_via_js = True
@@ -1521,7 +1535,7 @@ def apply_more_quota(
     # If we clicked via JS, we can't reliably read enabled/disabled state via a page element wrapper.
     # We'll just proceed and detect whether the quota form opened.
     if clicked_via_js:
-        wait_for_page_stable(page, timeout=4)
+        wait_for_page_stable(page, timeout=6)
     else:
         # If the button is disabled, the UI believes there is no API key yet.
         # This can happen when we create the key via API but the SPA store is stale.
@@ -1554,23 +1568,76 @@ def apply_more_quota(
             except Exception:
                 return {"ok": False, "error": "apply button click failed", "url": getattr(page, "url", "")}
 
-    wait_for_page_stable(page, timeout=4)
+    wait_for_page_stable(page, timeout=6)
     _debug_dump_quota(page, note="after_click_apply")
 
     # The quota form should open in a modal/dialog; if not, we likely clicked the wrong element
     # or the UI requires extra navigation in this environment.
     opened = False
     start = time.time()
-    while time.time() - start < 8:
+    while time.time() - start < 20:
         if _visible_dialog_count() > dialogs_before or _quota_form_visible():
             opened = True
             break
         time.sleep(0.3)
 
     if not opened:
+        # Capture some hints for hosted environments (HF Spaces) without requiring container access.
+        dbg: dict = {}
+        dbg_err = ""
+        dbg_js = """
+            try {
+              const isVisible = (el) => {
+                if (!el) return false;
+                const st = window.getComputedStyle(el);
+                if (!st) return false;
+                if (st.display === 'none' || st.visibility === 'hidden') return false;
+                const r = el.getBoundingClientRect();
+                return r && r.width > 0 && r.height > 0;
+              };
+              const texts = (el) => ((el.innerText || el.textContent || '') + '').trim();
+              const btns = Array.from(document.querySelectorAll('button,a,[role=\"button\"]')).filter(isVisible);
+              const cand = btns
+                .map(b => {
+                  const t = texts(b).slice(0, 90);
+                  const aria = ((b.getAttribute && b.getAttribute('aria-disabled')) || '').toLowerCase();
+                  const cls = ((b.getAttribute && b.getAttribute('class')) || '');
+                  const dis = !!b.disabled || aria === 'true' || (cls + '').toLowerCase().includes('disabled');
+                  const tl = t.toLowerCase();
+                  const hit = tl.includes('apply') || tl.includes('quota') || tl.includes('increase') || tl.includes('request') ||
+                    t.includes('\\u7533\\u8bf7') || t.includes('\\u914d\\u989d') || t.includes('\\u989d\\u5ea6') || t.includes('\\u63d0\\u989d');
+                  return hit ? { t, dis } : null;
+                })
+                .filter(x => !!x)
+                .slice(0, 12);
+
+              const toasts = Array.from(document.querySelectorAll('.ant-message-notice,.ant-notification-notice,[role=\"alert\"]'))
+                .filter(isVisible)
+                .map(el => texts(el).slice(0, 120))
+                .slice(0, 6);
+
+              return {
+                url: location.href,
+                viewport: { w: window.innerWidth, h: window.innerHeight },
+                dialogs: Array.from(document.querySelectorAll('[role=\"dialog\"],.ant-modal-content,.ant-modal,.modal')).filter(isVisible).length,
+                candidates: cand,
+                toasts
+              };
+            } catch (e) {
+              return { error: String(e), url: location.href };
+            }
+        """
+        try:
+            dbg = page.run_js(dbg_js, timeout=6) or {}
+        except Exception as e:
+            dbg_err = str(e)
+            dbg = {"dbg_error": dbg_err, "url": getattr(page, "url", "")}
+
+        _debug_dump_quota(page, note="quota_form_not_open_dbg")
+        # Always include dbg snippet; it will help identify disabled buttons / toasts / layout differences.
         return {
             "ok": False,
-            "error": "quota form did not open (button may be disabled / UI stale)",
+            "error": f"quota form did not open (dbg={json.dumps(dbg, ensure_ascii=True)[:600]})",
             "url": getattr(page, "url", ""),
         }
 

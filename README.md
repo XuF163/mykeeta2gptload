@@ -11,6 +11,12 @@ After deploying the Docker Space:
 - Or call `POST /run`
 - Check `GET /status` for tail logs / exit code
 
+If you want it to run continuously, set one of the following env vars:
+
+- `AUTO_RUN_ON_START=1` (run once on boot)
+- `RUN_EVERY_MINUTES=60` (run periodically)
+- or `RUN_EVERY_SECONDS=3600`
+
 Set env vars in Space Settings -> Variables / Secrets:
 
 - `GPTMAIL_API_KEY` (required)

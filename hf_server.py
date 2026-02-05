@@ -57,6 +57,16 @@ def _tail_text(path: str, max_bytes: int = 24_000) -> str:
         return ""
 
 
+def _as_int_env(name: str, default: int) -> int:
+    v = (os.getenv(name, "") or "").strip()
+    if not v:
+        return default
+    try:
+        return int(float(v))
+    except Exception:
+        return default
+
+
 def _run_job_background() -> None:
     log_path = "/tmp/job.log"
     with STATE.lock:
@@ -82,6 +92,46 @@ def _run_job_background() -> None:
             STATE.last_exit_code = exit_code
             STATE.last_finished_at = _now()
             STATE.last_log_tail = tail
+
+
+def _maybe_start_job() -> bool:
+    with STATE.lock:
+        if STATE.running:
+            return False
+        t = threading.Thread(target=_run_job_background, daemon=True)
+        t.start()
+        return True
+
+
+def _scheduler_loop() -> None:
+    """
+    Periodically trigger the job so the Space is "always working".
+
+    Configure via env:
+      - AUTO_RUN_ON_START=1
+      - RUN_EVERY_SECONDS=3600  (or RUN_EVERY_MINUTES)
+
+    If interval <= 0, scheduler is disabled.
+    """
+    auto = (os.getenv("AUTO_RUN_ON_START", "") or "").strip().lower() in ("1", "true", "yes", "y", "on")
+    every_s = _as_int_env("RUN_EVERY_SECONDS", 0)
+    if every_s <= 0:
+        every_m = _as_int_env("RUN_EVERY_MINUTES", 0)
+        if every_m > 0:
+            every_s = every_m * 60
+
+    if auto:
+        _maybe_start_job()
+
+    if every_s <= 0:
+        return
+
+    # Small initial delay to let the server come up.
+    time.sleep(2.0)
+    while True:
+        # If a run is already executing, just wait.
+        _maybe_start_job()
+        time.sleep(max(5, every_s))
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -158,14 +208,17 @@ class Handler(BaseHTTPRequestHandler):
             if STATE.running:
                 self._send_json(200, {"started": False, "reason": "already_running"})
                 return
-            t = threading.Thread(target=_run_job_background, daemon=True)
-            t.start()
-            self._send_json(200, {"started": True})
+            started = _maybe_start_job()
+            self._send_json(200, {"started": bool(started)})
 
 
 def main() -> int:
     port = int(os.getenv("PORT", "7860"))
     host = "0.0.0.0"
+
+    # Optional: periodic runner for "always on" Spaces.
+    threading.Thread(target=_scheduler_loop, daemon=True).start()
+
     httpd = HTTPServer((host, port), Handler)
     print(f"[hf_server] listening on http://{host}:{port}", flush=True)
     httpd.serve_forever()
@@ -174,4 +227,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

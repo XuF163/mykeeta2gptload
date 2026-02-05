@@ -117,18 +117,28 @@ def cmd_generate(count: int) -> list[dict]:
         if i > 0:
             time.sleep(random.uniform(0.5, 1.5))
 
-        r = create_longcat_account_and_api_key(
-            passport_login_url=passport_url,
-            csv_path=LONGCAT_CSV_PATH or "temp/longcat_keys.csv",
-        )
+        try:
+            r = create_longcat_account_and_api_key(
+                passport_login_url=passport_url,
+                csv_path=LONGCAT_CSV_PATH or "temp/longcat_keys.csv",
+            )
+        except Exception as e:
+            # Hosted runtimes (Zeabur/HF) may restart the container on non-zero exits.
+            # Treat per-key failures as soft-fail so a transient OTP / UI issue doesn't
+            # crash the whole job.
+            log.warning(f"LongCat flow failed: {e}")
+            r = {"ok": False, "error": str(e), "api_key": ""}
+
         results.append(r)
 
-        api_key = r.get("api_key", "")
-        log.success(f"LongCat API Key: {api_key}")
+        api_key = (r.get("api_key", "") or "").strip()
+        if api_key:
+            log.success(f"LongCat API Key: {api_key}")
         _append_key_line(keys_path, api_key)
 
         # Realtime-ish: submit right after generation.
-        _maybe_sync_keys_to_gpt_load([api_key])
+        if api_key:
+            _maybe_sync_keys_to_gpt_load([api_key])
 
     return results
 

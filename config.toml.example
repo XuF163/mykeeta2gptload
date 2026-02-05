@@ -41,7 +41,8 @@ passport_login_url = ""
 keys_count = 1
 keys_file = "temp/longcat_keys.txt"
 csv_path = "temp/longcat_keys.csv"
-apply_quota = true
+# Quota application via UI is best-effort and may break when the site changes.
+apply_quota = false
 quota_industry = "Internet"
 quota_scenario = "Chatbot"
 

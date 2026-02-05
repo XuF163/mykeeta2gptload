@@ -44,5 +44,6 @@ RUN uv sync --frozen --no-install-project \
 # Copy the rest of the project (config.toml is excluded via .dockerignore).
 COPY . /app
 
-# Default command (works for both headless and non-headless when Xvfb is present).
-CMD ["sh", "-lc", "xvfb-run -a uv run python run.py"]
+# HuggingFace Spaces expects a long-running process listening on $PORT.
+# We run a tiny HTTP server that can trigger the job on demand.
+CMD ["sh", "-lc", "python hf_server.py"]

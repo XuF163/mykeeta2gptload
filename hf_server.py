@@ -8,6 +8,7 @@ server to keep the container alive and allow triggering runs.
 Endpoints:
   GET  /health   -> 200 OK
   GET  /status   -> JSON (running/last exit code + tail)
+  GET  /log      -> HTML (key generator run + status)
   POST /run      -> start a background run (if not already running)
 
 The actual job is executed via:
@@ -20,10 +21,13 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import subprocess
 import threading
 import time
+import urllib.parse
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.client import HTTPConnection
 from typing import Any
 
 
@@ -67,6 +71,78 @@ def _as_int_env(name: str, default: int) -> int:
         return default
 
 
+def _wait_for_tcp(host: str, port: int, timeout_s: float = 15.0) -> bool:
+    """
+    Small helper to wait for an internal service port to become reachable.
+    """
+    deadline = _now() + max(0.1, timeout_s)
+    while _now() < deadline:
+        try:
+            with socket.create_connection((host, port), timeout=1.0):
+                return True
+        except OSError:
+            time.sleep(0.25)
+    return False
+
+
+GPT_LOAD_INTERNAL_HOST = "127.0.0.1"
+GPT_LOAD_INTERNAL_PORT = 3001
+GPT_LOAD_INTERNAL_BASE = f"http://{GPT_LOAD_INTERNAL_HOST}:{GPT_LOAD_INTERNAL_PORT}"
+
+
+class _GptLoadState:
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.proc: subprocess.Popen[bytes] | None = None
+        self.last_start_error: str = ""
+
+
+GPT_LOAD = _GptLoadState()
+
+
+def _start_gpt_load_once() -> None:
+    """
+    Start gpt-load as an internal service and reverse-proxy it from this server.
+
+    HF Spaces only exposes one external port ($PORT), so we keep gpt-load on
+    127.0.0.1:3001 and proxy it.
+    """
+    with GPT_LOAD.lock:
+        if GPT_LOAD.proc is not None and GPT_LOAD.proc.poll() is None:
+            return
+
+        env = os.environ.copy()
+        env["HOST"] = GPT_LOAD_INTERNAL_HOST
+        env["PORT"] = str(GPT_LOAD_INTERNAL_PORT)
+        env.setdefault("TZ", "Asia/Shanghai")
+
+        # Use the same secret for both:
+        # - gpt-load management API/UI auth
+        # - mykeeta -> gpt-load import auth
+        auth_key = (env.get("GPT_LOAD_AUTH_KEY") or "").strip()
+        env["AUTH_KEY"] = auth_key or env.get("AUTH_KEY", "").strip() or "change-me"
+        env["ENCRYPTION_KEY"] = (env.get("GPT_LOAD_ENCRYPTION_KEY") or env.get("ENCRYPTION_KEY") or "").strip()
+
+        # Prefer an explicit DSN to avoid SQLite locking under concurrency.
+        # Users can set this in HF Space Secrets/Variables.
+        # (gpt-load uses SQLite at ./data/gpt-load.db when DATABASE_DSN is empty.)
+        env["DATABASE_DSN"] = (env.get("GPT_LOAD_DATABASE_DSN") or env.get("DATABASE_DSN") or "").strip()
+
+        try:
+            # The binary is copied into the image in Dockerfile.
+            # Log to a file so /status can show something helpful on failures.
+            gpt_log_path = "/tmp/gpt-load.log"
+            out = open(gpt_log_path, "ab", buffering=0)
+            GPT_LOAD.proc = subprocess.Popen(["gpt-load"], stdout=out, stderr=subprocess.STDOUT, env=env)
+            GPT_LOAD.last_start_error = ""
+        except Exception as e:
+            GPT_LOAD.proc = None
+            GPT_LOAD.last_start_error = str(e)
+
+    # Best-effort wait so the first proxied request doesn't race.
+    _wait_for_tcp(GPT_LOAD_INTERNAL_HOST, GPT_LOAD_INTERNAL_PORT, timeout_s=10.0)
+
+
 def _run_job_background() -> None:
     log_path = "/tmp/job.log"
     with STATE.lock:
@@ -82,7 +158,10 @@ def _run_job_background() -> None:
     exit_code: int | None = None
     try:
         with open(log_path, "wb") as out:
-            p = subprocess.Popen(cmd, stdout=out, stderr=subprocess.STDOUT)
+            env = os.environ.copy()
+            # Default to the co-located gpt-load instance.
+            env.setdefault("GPT_LOAD_BASE_URL", GPT_LOAD_INTERNAL_BASE)
+            p = subprocess.Popen(cmd, stdout=out, stderr=subprocess.STDOUT, env=env)
             exit_code = int(p.wait())
     except Exception:
         exit_code = 1
@@ -142,6 +221,12 @@ class Handler(BaseHTTPRequestHandler):
         # Keep stdout clean; Spaces shows container logs elsewhere.
         return
 
+    def _read_body(self) -> bytes:
+        n = int(self.headers.get("Content-Length", "0") or "0")
+        if n <= 0:
+            return b""
+        return self.rfile.read(n)
+
     def _send(self, code: int, body: bytes, content_type: str = "text/plain; charset=utf-8") -> None:
         self.send_response(code)
         self.send_header("Content-Type", content_type)
@@ -153,33 +238,119 @@ class Handler(BaseHTTPRequestHandler):
         body = json.dumps(payload, ensure_ascii=True, indent=2).encode("utf-8")
         self._send(code, body, "application/json; charset=utf-8")
 
+    def _log_page_html(self) -> bytes:
+        # A lightweight UI to trigger the generator job and view the tail logs.
+        return (
+            "<!doctype html><html><head><meta charset='utf-8'/>"
+            "<meta name='viewport' content='width=device-width, initial-scale=1'/>"
+            "<title>mykeeta2gptload / log</title>"
+            "<style>"
+            "body{font-family:ui-monospace,Menlo,Consolas,monospace;padding:24px;max-width:980px}"
+            "a{color:#111} .top{display:flex;gap:12px;align-items:center;flex-wrap:wrap}"
+            "button{padding:10px 14px;border:1px solid #111;background:#111;color:#fff;cursor:pointer;border-radius:10px}"
+            "button.secondary{background:#fff;color:#111}"
+            "pre{white-space:pre-wrap;background:#f6f6f6;padding:12px;border-radius:12px;border:1px solid #e6e6e6;}"
+            ".hint{color:#555;font-size:12px}"
+            "</style></head><body>"
+            "<div class='top'>"
+            "<h2 style='margin:0'>Key Generator Log</h2>"
+            "<a href='/' target='_self'>Open GPT-Load</a>"
+            "</div>"
+            "<p class='hint'>HF Spaces: '/' is proxied to GPT-Load. This page is the generator runner.</p>"
+            "<p><button onclick='run()'>Run Job</button> "
+            "<button class='secondary' onclick='refresh()'>Refresh</button></p>"
+            "<pre id='out'>Loading...</pre>"
+            "<script>"
+            "async function refresh(){"
+            " const r=await fetch('/status',{cache:'no-store'}); const j=await r.json();"
+            " document.getElementById('out').textContent=JSON.stringify(j,null,2);"
+            "}"
+            "async function run(){"
+            " const r=await fetch('/run',{method:'POST'}); const j=await r.json();"
+            " await refresh();"
+            "}"
+            "refresh();"
+            "setInterval(refresh, 5000);"
+            "</script></body></html>"
+        ).encode("utf-8")
+
+    def _send_log_page(self) -> None:
+        self._send(200, self._log_page_html(), "text/html; charset=utf-8")
+
+    def _is_reserved_path(self, path: str) -> bool:
+        p = urllib.parse.urlparse(path).path
+        return p in ("/health", "/status", "/run", "/log")
+
+    def _proxy_to_gpt_load(self) -> None:
+        _start_gpt_load_once()
+
+        try:
+            url = urllib.parse.urlparse(self.path)
+            target_path = url.path or "/"
+            if url.query:
+                target_path += "?" + url.query
+
+            body = self._read_body()
+            conn = HTTPConnection(GPT_LOAD_INTERNAL_HOST, GPT_LOAD_INTERNAL_PORT, timeout=30)
+
+            # Forward headers (minus hop-by-hop ones).
+            hop_by_hop = {
+                "connection",
+                "keep-alive",
+                "proxy-authenticate",
+                "proxy-authorization",
+                "te",
+                "trailers",
+                "transfer-encoding",
+                "upgrade",
+            }
+            fwd_headers: dict[str, str] = {}
+            for k, v in self.headers.items():
+                if k.lower() in hop_by_hop:
+                    continue
+                # We terminate at this server, so make Host match the internal service.
+                if k.lower() == "host":
+                    continue
+                fwd_headers[k] = v
+
+            fwd_headers["Host"] = f"{GPT_LOAD_INTERNAL_HOST}:{GPT_LOAD_INTERNAL_PORT}"
+            if body and "Content-Length" not in fwd_headers:
+                fwd_headers["Content-Length"] = str(len(body))
+
+            conn.request(self.command, target_path, body=body if body else None, headers=fwd_headers)
+            resp = conn.getresponse()
+            resp_body = resp.read()
+
+            self.send_response(resp.status)
+            for k, v in resp.getheaders():
+                if k.lower() in hop_by_hop:
+                    continue
+                # We'll re-set Content-Length after reading.
+                if k.lower() == "content-length":
+                    continue
+                self.send_header(k, v)
+            self.send_header("Content-Length", str(len(resp_body)))
+            self.end_headers()
+            self.wfile.write(resp_body)
+        except Exception as e:
+            with GPT_LOAD.lock:
+                start_err = GPT_LOAD.last_start_error
+                pid = GPT_LOAD.proc.pid if (GPT_LOAD.proc is not None) else None
+                running = bool(GPT_LOAD.proc is not None and GPT_LOAD.proc.poll() is None)
+            payload = {
+                "error": "gpt-load proxy failed",
+                "detail": str(e),
+                "gpt_load_running": running,
+                "gpt_load_pid": pid,
+                "gpt_load_start_error": start_err,
+                "gpt_load_log_tail": _tail_text("/tmp/gpt-load.log", max_bytes=8_000)[-8_000:],
+                "hint": "Set HF Space Secret GPT_LOAD_AUTH_KEY and (recommended) GPT_LOAD_DATABASE_DSN.",
+            }
+            self._send_json(502, payload)
+
     def do_GET(self) -> None:  # noqa: N802
-        if self.path == "/" or self.path.startswith("/?"):
-            html = (
-                "<!doctype html><html><head><meta charset='utf-8'/>"
-                "<meta name='viewport' content='width=device-width, initial-scale=1'/>"
-                "<title>mykeeta2gptload</title>"
-                "<style>body{font-family:ui-monospace,Menlo,Consolas,monospace;padding:24px;max-width:880px}"
-                "button{padding:10px 14px;border:1px solid #111;background:#111;color:#fff;cursor:pointer}"
-                "pre{white-space:pre-wrap;background:#f6f6f6;padding:12px;border-radius:8px;}"
-                "</style></head><body>"
-                "<h2>mykeeta2gptload</h2>"
-                "<p>This container runs a LongCat key generation job on demand.</p>"
-                "<p><button onclick='run()'>Run Job</button> <button onclick='refresh()'>Refresh Status</button></p>"
-                "<pre id='out'>Loading...</pre>"
-                "<script>"
-                "async function refresh(){"
-                " const r=await fetch('/status'); const j=await r.json();"
-                " document.getElementById('out').textContent=JSON.stringify(j,null,2);"
-                "}"
-                "async function run(){"
-                " const r=await fetch('/run',{method:'POST'}); const j=await r.json();"
-                " document.getElementById('out').textContent=JSON.stringify(j,null,2);"
-                "}"
-                "refresh();"
-                "</script></body></html>"
-            ).encode("utf-8")
-            self._send(200, html, "text/html; charset=utf-8")
+        if self.path == "/log" or self.path.startswith("/log?"):
+            self._send_log_page()
             return
 
         if self.path == "/health":
@@ -195,22 +366,58 @@ class Handler(BaseHTTPRequestHandler):
                     "last_finished_at": STATE.last_finished_at,
                     "log_tail": STATE.last_log_tail[-12_000:],
                 }
+            with GPT_LOAD.lock:
+                payload.update(
+                    {
+                        "gpt_load_running": bool(GPT_LOAD.proc is not None and GPT_LOAD.proc.poll() is None),
+                        "gpt_load_pid": GPT_LOAD.proc.pid if GPT_LOAD.proc is not None else None,
+                        "gpt_load_start_error": GPT_LOAD.last_start_error,
+                        "gpt_load_log_tail": _tail_text("/tmp/gpt-load.log", max_bytes=8_000)[-8_000:],
+                    }
+                )
             self._send_json(200, payload)
+            return
+
+        # Default: serve GPT-Load management UI to the outside world.
+        if not self._is_reserved_path(self.path):
+            self._proxy_to_gpt_load()
             return
 
         self._send(404, b"not found\n")
 
     def do_POST(self) -> None:  # noqa: N802
-        if self.path != "/run":
-            self._send(404, b"not found\n")
+        if self.path == "/run":
+            with STATE.lock:
+                if STATE.running:
+                    self._send_json(200, {"started": False, "reason": "already_running"})
+                    return
+                started = _maybe_start_job()
+                self._send_json(200, {"started": bool(started)})
             return
 
-        with STATE.lock:
-            if STATE.running:
-                self._send_json(200, {"started": False, "reason": "already_running"})
-                return
-            started = _maybe_start_job()
-            self._send_json(200, {"started": bool(started)})
+        if not self._is_reserved_path(self.path):
+            self._proxy_to_gpt_load()
+            return
+
+        self._send(404, b"not found\n")
+
+    def do_PUT(self) -> None:  # noqa: N802
+        if not self._is_reserved_path(self.path):
+            self._proxy_to_gpt_load()
+            return
+        self._send(404, b"not found\n")
+
+    def do_DELETE(self) -> None:  # noqa: N802
+        if not self._is_reserved_path(self.path):
+            self._proxy_to_gpt_load()
+            return
+        self._send(404, b"not found\n")
+
+    def do_OPTIONS(self) -> None:  # noqa: N802
+        if not self._is_reserved_path(self.path):
+            self._proxy_to_gpt_load()
+            return
+        self._send(204, b"")
 
 
 def main() -> int:
@@ -219,6 +426,9 @@ def main() -> int:
 
     # Optional: periodic runner for "always on" Spaces.
     threading.Thread(target=_scheduler_loop, daemon=True).start()
+
+    # Start gpt-load in the background so '/' is immediately usable.
+    threading.Thread(target=_start_gpt_load_once, daemon=True).start()
 
     httpd = HTTPServer((host, port), Handler)
     print(f"[hf_server] listening on http://{host}:{port}", flush=True)

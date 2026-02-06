@@ -12,6 +12,9 @@ wheels/
 # Sensitive configuration (use config.toml.example as template)
 config.toml
 
+# Docker Compose local env (secrets should not be committed)
+.env
+
 # Data files with sensitive information
 accounts.csv
 team.json

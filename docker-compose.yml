@@ -11,8 +11,9 @@ services:
       UV_PROJECT_ENVIRONMENT: /opt/uv-venv
       # Secrets/endpoints (recommended to set in your server env or an .env file)
       GPTMAIL_API_KEY: "${GPTMAIL_API_KEY:-}"
-      GPT_LOAD_BASE_URL: "${GPT_LOAD_BASE_URL:-}"
-      GPT_LOAD_GROUP_NAME: "${GPT_LOAD_GROUP_NAME:-}"
+      # Point to the local gpt-load service by default.
+      GPT_LOAD_BASE_URL: "${GPT_LOAD_BASE_URL:-http://gpt-load:3001}"
+      GPT_LOAD_GROUP_NAME: "${GPT_LOAD_GROUP_NAME:-#pinhaofan}"
       GPT_LOAD_AUTH_KEY: "${GPT_LOAD_AUTH_KEY:-}"
     volumes:
       # Use your existing config.toml and keep outputs on the host.
@@ -21,7 +22,63 @@ services:
       - uv_cache:/root/.cache/uv
     command: >
       sh -lc "uv sync --frozen && xvfb-run -a uv run python run.py"
+    # Start order only. We don't gate on healthchecks because the gpt-load image
+    # might not contain wget/curl; mykeeta's sync code can retry on its own.
+    depends_on:
+      - gpt-load
+
+  # Local GPT-Load (management UI + import API).
+  # NOTE: We use PostgreSQL to avoid SQLite locking issues under concurrency.
+  gpt-load:
+    # Option A (recommended): use the upstream prebuilt image.
+    image: ghcr.io/tbphp/gpt-load:latest
+    # Option B: build from your fork (requires network + build time).
+    # build:
+    #   context: https://github.com/XuF163/gpt-load.git
+    container_name: gpt-load
+    restart: unless-stopped
+    environment:
+      PORT: "3001"
+      HOST: "0.0.0.0"
+      TZ: "${TZ:-Asia/Shanghai}"
+      # Protect management API/UI (same secret used by mykeeta's GPT_LOAD_AUTH_KEY).
+      AUTH_KEY: "${GPT_LOAD_AUTH_KEY:-change-me}"
+      # Use Postgres (non-empty) to avoid SQLite lock contention.
+      DATABASE_DSN: "postgres://postgres:${POSTGRES_PASSWORD:-123456}@postgres:5432/gpt-load?sslmode=disable"
+      # Optional: encrypt API keys at rest in DB (set a long random string).
+      ENCRYPTION_KEY: "${GPT_LOAD_ENCRYPTION_KEY:-}"
+    ports:
+      - "3001:3001"
+    volumes:
+      - gpt_load_data:/app/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider -T 5 -O /dev/null http://localhost:3001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  postgres:
+    image: postgres:16
+    container_name: gpt-load-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-123456}"
+      POSTGRES_DB: gpt-load
+    volumes:
+      - gpt_load_postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d gpt-load"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
 volumes:
   uv_venv:
   uv_cache:
+  gpt_load_data:
+  gpt_load_postgres:

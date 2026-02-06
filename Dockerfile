@@ -1,3 +1,5 @@
+FROM ghcr.io/tbphp/gpt-load:latest AS gptload
+
 FROM python:3.12-slim-bookworm
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -13,6 +15,7 @@ RUN set -eux; \
       ca-certificates \
       curl \
       chromium \
+      tzdata \
       xvfb \
       xauth \
       fonts-liberation; \
@@ -34,6 +37,9 @@ ENV UV_PROJECT_ENVIRONMENT=/opt/uv-venv
 ENV UV_CACHE_DIR=/tmp/uv-cache
 
 WORKDIR /app
+
+# gpt-load (internal service for HF Spaces). The binary is static (CGO=0).
+COPY --from=gptload /app/gpt-load /usr/local/bin/gpt-load
 
 # Install Python deps at build time for prebuilt images (GitHub Actions / GHCR).
 # We copy only the dependency manifests first to maximize Docker layer caching.

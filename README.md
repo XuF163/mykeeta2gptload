@@ -1,15 +1,42 @@
 # Docker Deployment (Recommended)
 
+## Local Docker Compose (mykeeta + gpt-load + Postgres)
+
+This repo includes a `docker-compose.yml` that starts:
+
+- `postgres` (required for gpt-load; avoids SQLite locking)
+- `gpt-load` on `http://localhost:3001` (UI + import API)
+- `mykeeta` (generates keys and imports them into gpt-load if `GPT_LOAD_AUTH_KEY` is set)
+
+Recommended: use a `.env` file (see `.env.example`) or set env vars in your shell:
+
+- `GPTMAIL_API_KEY` (required)
+- `GPT_LOAD_AUTH_KEY` (required if you want auto-import into gpt-load)
+- `GPT_LOAD_GROUP_NAME` (optional, default `#pinhaofan`)
+- `POSTGRES_PASSWORD` (optional, default `123456`)
+
+Run:
+
+```bash
+docker compose up --build --abort-on-container-exit
+```
+
+Then open gpt-load:
+
+- `http://localhost:3001`
+
 ## HuggingFace Spaces (Docker Space)
 
 This repo is a job-style container (generate keys then exit). HF Spaces expects a long-running
-web process, so the image runs `hf_server.py` by default.
+web process, so the image runs `hf_server.py` by default. For HF, the container also starts a
+co-located `gpt-load` service and reverse-proxies it.
 
 After deploying the Docker Space:
 
-- Open the Space URL, click `Run Job`
-- Or call `POST /run`
-- Check `GET /status` for tail logs / exit code
+- Open the Space URL (`/`) -> GPT-Load management UI
+- Open `/log` -> key generator runner + tail logs
+- Or trigger runs via `POST /run`
+- Check `GET /status` for tail logs / exit code (JSON)
 
 If you want it to run continuously, set one of the following env vars:
 
@@ -23,6 +50,7 @@ Set env vars in Space Settings -> Variables / Secrets:
 - `GPT_LOAD_AUTH_KEY` (optional, for GPT-Load sync)
 - `GPT_LOAD_BASE_URL` (optional)
 - `GPT_LOAD_GROUP_NAME` (optional)
+- `GPT_LOAD_DATABASE_DSN` (recommended for gpt-load; avoid SQLite locking)
 
 
 3) Go to Zeabur -> New Project -> Import from GitHub -> select your fork

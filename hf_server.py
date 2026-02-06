@@ -26,6 +26,7 @@ import subprocess
 import threading
 import time
 import urllib.parse
+import re
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from http.client import HTTPConnection
 from typing import Any
@@ -100,6 +101,35 @@ class _GptLoadState:
 GPT_LOAD = _GptLoadState()
 
 
+def _summarize_database_dsn(dsn: str) -> dict[str, str]:
+    """
+    Return a non-sensitive DSN summary for debugging persistence issues.
+    """
+    dsn = (dsn or "").strip()
+    if not dsn:
+        return {"mode": "sqlite", "host": "", "db": ""}
+
+    # URL DSN: postgres://user:pass@host:5432/dbname?...
+    try:
+        u = urllib.parse.urlparse(dsn)
+        if u.scheme and u.netloc:
+            db = (u.path or "").lstrip("/")
+            return {"mode": u.scheme, "host": u.hostname or "", "db": db}
+    except Exception:
+        pass
+
+    # key=value DSN: host=... user=... dbname=... sslmode=...
+    host = ""
+    db = ""
+    m = re.search(r"(?:^|\s)host=([^\s]+)", dsn)
+    if m:
+        host = m.group(1).strip()
+    m = re.search(r"(?:^|\s)dbname=([^\s]+)", dsn)
+    if m:
+        db = m.group(1).strip()
+    return {"mode": "dsn", "host": host, "db": db}
+
+
 def _start_gpt_load_once() -> None:
     """
     Start gpt-load as an internal service and reverse-proxy it from this server.
@@ -127,12 +157,19 @@ def _start_gpt_load_once() -> None:
         # Users can set this in HF Space Secrets/Variables.
         # (gpt-load uses SQLite at ./data/gpt-load.db when DATABASE_DSN is empty.)
         env["DATABASE_DSN"] = (env.get("GPT_LOAD_DATABASE_DSN") or env.get("DATABASE_DSN") or "").strip()
+        db_summary = _summarize_database_dsn(env["DATABASE_DSN"])
 
         try:
             # The binary is copied into the image in Dockerfile.
             # Log to a file so /status can show something helpful on failures.
             gpt_log_path = "/tmp/gpt-load.log"
             out = open(gpt_log_path, "ab", buffering=0)
+            out.write(
+                (
+                    f"[hf_server] starting gpt-load: db_mode={db_summary['mode']} "
+                    f"db_host={db_summary['host']} db_name={db_summary['db']}\n"
+                ).encode("utf-8", errors="replace")
+            )
             GPT_LOAD.proc = subprocess.Popen(["gpt-load"], stdout=out, stderr=subprocess.STDOUT, env=env)
             GPT_LOAD.last_start_error = ""
         except Exception as e:
@@ -358,20 +395,28 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if self.path == "/status":
+            # While a job is running, show a live tail of the current log file.
+            live_tail = _tail_text("/tmp/job.log", max_bytes=24_000)[-12_000:]
             with STATE.lock:
                 payload = {
                     "running": STATE.running,
                     "last_exit_code": STATE.last_exit_code,
                     "last_started_at": STATE.last_started_at,
                     "last_finished_at": STATE.last_finished_at,
-                    "log_tail": STATE.last_log_tail[-12_000:],
+                    "log_tail": (live_tail or STATE.last_log_tail)[-12_000:],
                 }
             with GPT_LOAD.lock:
+                db_summary = _summarize_database_dsn(
+                    (os.getenv("GPT_LOAD_DATABASE_DSN") or os.getenv("DATABASE_DSN") or "").strip()
+                )
                 payload.update(
                     {
                         "gpt_load_running": bool(GPT_LOAD.proc is not None and GPT_LOAD.proc.poll() is None),
                         "gpt_load_pid": GPT_LOAD.proc.pid if GPT_LOAD.proc is not None else None,
                         "gpt_load_start_error": GPT_LOAD.last_start_error,
+                        "gpt_load_db_mode": db_summary["mode"],
+                        "gpt_load_db_host": db_summary["host"],
+                        "gpt_load_db_name": db_summary["db"],
                         "gpt_load_log_tail": _tail_text("/tmp/gpt-load.log", max_bytes=8_000)[-8_000:],
                     }
                 )

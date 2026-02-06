@@ -31,6 +31,8 @@ This repo is a job-style container (generate keys then exit). HF Spaces expects 
 web process, so the image runs `hf_server.py` by default. For HF, the container also starts a
 co-located `gpt-load` service and reverse-proxies it.
 
+Note: `gpt-load` is built from source at image build time (to support forks without prebuilt images).
+
 After deploying the Docker Space:
 
 - Open the Space URL (`/`) -> GPT-Load management UI

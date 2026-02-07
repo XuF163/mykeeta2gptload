@@ -27,7 +27,7 @@ import threading
 import time
 import urllib.parse
 import re
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from http.client import HTTPConnection
 from typing import Any
 
@@ -96,6 +96,8 @@ class _GptLoadState:
         self.lock = threading.Lock()
         self.proc: subprocess.Popen[bytes] | None = None
         self.last_start_error: str = ""
+        self.restart_count: int = 0
+        self.last_probe_ok_at: float | None = None
 
 
 GPT_LOAD = _GptLoadState()
@@ -178,6 +180,95 @@ def _start_gpt_load_once() -> None:
 
     # Best-effort wait so the first proxied request doesn't race.
     _wait_for_tcp(GPT_LOAD_INTERNAL_HOST, GPT_LOAD_INTERNAL_PORT, timeout_s=10.0)
+
+
+def _terminate_proc(p: subprocess.Popen[bytes]) -> None:
+    try:
+        p.terminate()
+    except Exception:
+        return
+    # Give it a moment to exit gracefully; then force kill.
+    deadline = _now() + 3.0
+    while _now() < deadline:
+        try:
+            if p.poll() is not None:
+                return
+        except Exception:
+            return
+        time.sleep(0.1)
+    try:
+        p.kill()
+    except Exception:
+        pass
+
+
+def _restart_gpt_load(reason: str) -> None:
+    """
+    Best-effort restart when gpt-load is stuck or database/network glitches happen.
+    """
+    with GPT_LOAD.lock:
+        if GPT_LOAD.proc is not None and GPT_LOAD.proc.poll() is None:
+            old = GPT_LOAD.proc
+        else:
+            old = None
+        GPT_LOAD.proc = None
+
+    if old is not None:
+        _terminate_proc(old)
+
+    # Append a restart marker to the log.
+    try:
+        with open("/tmp/gpt-load.log", "ab", buffering=0) as f:
+            f.write(f"[hf_server] restarting gpt-load: {reason}\n".encode("utf-8", errors="replace"))
+    except Exception:
+        pass
+
+    with GPT_LOAD.lock:
+        GPT_LOAD.restart_count += 1
+
+    _start_gpt_load_once()
+
+
+def _probe_gpt_load_once(timeout_s: float = 3.0) -> bool:
+    """
+    Lightweight probe to detect dead/hung gpt-load.
+    """
+    try:
+        conn = HTTPConnection(GPT_LOAD_INTERNAL_HOST, GPT_LOAD_INTERNAL_PORT, timeout=timeout_s)
+        # If auth is enabled, "/" returns the login page and is safe to probe.
+        conn.request("GET", "/")
+        resp = conn.getresponse()
+        _ = resp.read(256)
+        ok = 200 <= int(resp.status) < 500
+    except Exception:
+        ok = False
+
+    if ok:
+        with GPT_LOAD.lock:
+            GPT_LOAD.last_probe_ok_at = _now()
+    return ok
+
+
+def _gpt_load_watchdog_loop() -> None:
+    """
+    Keep gpt-load usable on long-running Spaces.
+
+    HF's runtime may experience transient network/db issues; gpt-load may hang or exit.
+    """
+    # Initial delay so startup logs are readable.
+    time.sleep(5.0)
+    fail = 0
+    while True:
+        # Probe periodically; restart after a few consecutive failures.
+        ok = _probe_gpt_load_once(timeout_s=3.0)
+        if ok:
+            fail = 0
+        else:
+            fail += 1
+            if fail >= 3:
+                _restart_gpt_load("watchdog probe failed (3x)")
+                fail = 0
+        time.sleep(20.0)
 
 
 def _run_job_background() -> None:
@@ -328,7 +419,7 @@ class Handler(BaseHTTPRequestHandler):
                 target_path += "?" + url.query
 
             body = self._read_body()
-            conn = HTTPConnection(GPT_LOAD_INTERNAL_HOST, GPT_LOAD_INTERNAL_PORT, timeout=30)
+            conn = HTTPConnection(GPT_LOAD_INTERNAL_HOST, GPT_LOAD_INTERNAL_PORT, timeout=10)
 
             # Forward headers (minus hop-by-hop ones).
             hop_by_hop = {
@@ -374,16 +465,29 @@ class Handler(BaseHTTPRequestHandler):
                 start_err = GPT_LOAD.last_start_error
                 pid = GPT_LOAD.proc.pid if (GPT_LOAD.proc is not None) else None
                 running = bool(GPT_LOAD.proc is not None and GPT_LOAD.proc.poll() is None)
+                last_probe_ok_at = GPT_LOAD.last_probe_ok_at
+                restart_count = GPT_LOAD.restart_count
             payload = {
                 "error": "gpt-load proxy failed",
                 "detail": str(e),
                 "gpt_load_running": running,
                 "gpt_load_pid": pid,
                 "gpt_load_start_error": start_err,
+                "gpt_load_last_probe_ok_at": last_probe_ok_at,
+                "gpt_load_restart_count": restart_count,
                 "gpt_load_log_tail": _tail_text("/tmp/gpt-load.log", max_bytes=8_000)[-8_000:],
                 "hint": "Set HF Space Secret GPT_LOAD_AUTH_KEY and (recommended) GPT_LOAD_DATABASE_DSN.",
             }
+            # If the port is refusing or timing out, restart in the background.
+            threading.Thread(target=_restart_gpt_load, args=(f"proxy error: {e}",), daemon=True).start()
             self._send_json(502, payload)
+
+    def do_HEAD(self) -> None:  # noqa: N802
+        # Treat HEAD as a proxy request. This helps with some platform health checks.
+        if not self._is_reserved_path(self.path):
+            self._proxy_to_gpt_load()
+            return
+        self._send(404, b"not found\n")
 
     def do_GET(self) -> None:  # noqa: N802
         if self.path == "/log" or self.path.startswith("/log?"):
@@ -414,6 +518,8 @@ class Handler(BaseHTTPRequestHandler):
                         "gpt_load_running": bool(GPT_LOAD.proc is not None and GPT_LOAD.proc.poll() is None),
                         "gpt_load_pid": GPT_LOAD.proc.pid if GPT_LOAD.proc is not None else None,
                         "gpt_load_start_error": GPT_LOAD.last_start_error,
+                        "gpt_load_restart_count": GPT_LOAD.restart_count,
+                        "gpt_load_last_probe_ok_at": GPT_LOAD.last_probe_ok_at,
                         "gpt_load_db_mode": db_summary["mode"],
                         "gpt_load_db_host": db_summary["host"],
                         "gpt_load_db_name": db_summary["db"],
@@ -474,8 +580,10 @@ def main() -> int:
 
     # Start gpt-load in the background so '/' is immediately usable.
     threading.Thread(target=_start_gpt_load_once, daemon=True).start()
+    threading.Thread(target=_gpt_load_watchdog_loop, daemon=True).start()
 
-    httpd = HTTPServer((host, port), Handler)
+    httpd = ThreadingHTTPServer((host, port), Handler)
+    httpd.daemon_threads = True
     print(f"[hf_server] listening on http://{host}:{port}", flush=True)
     httpd.serve_forever()
     return 0

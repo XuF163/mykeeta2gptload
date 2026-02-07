@@ -98,9 +98,16 @@ class _GptLoadState:
         self.last_start_error: str = ""
         self.restart_count: int = 0
         self.last_probe_ok_at: float | None = None
+        self.last_started_at: float | None = None
+        self.last_restart_at: float | None = None
+        self.last_exit_code: int | None = None
 
 
 GPT_LOAD = _GptLoadState()
+
+# If gpt-load is slow to boot (DB cold start), avoid restart storms.
+GPT_LOAD_STARTUP_GRACE_S = _as_int_env("GPT_LOAD_STARTUP_GRACE_S", 25)
+GPT_LOAD_RESTART_COOLDOWN_S = _as_int_env("GPT_LOAD_RESTART_COOLDOWN_S", 30)
 
 
 def _summarize_database_dsn(dsn: str) -> dict[str, str]:
@@ -174,6 +181,7 @@ def _start_gpt_load_once() -> None:
             )
             GPT_LOAD.proc = subprocess.Popen(["gpt-load"], stdout=out, stderr=subprocess.STDOUT, env=env)
             GPT_LOAD.last_start_error = ""
+            GPT_LOAD.last_started_at = _now()
         except Exception as e:
             GPT_LOAD.proc = None
             GPT_LOAD.last_start_error = str(e)
@@ -206,11 +214,20 @@ def _restart_gpt_load(reason: str) -> None:
     """
     Best-effort restart when gpt-load is stuck or database/network glitches happen.
     """
+    now = _now()
     with GPT_LOAD.lock:
+        if GPT_LOAD.last_restart_at is not None and (now - GPT_LOAD.last_restart_at) < float(GPT_LOAD_RESTART_COOLDOWN_S):
+            return
+        GPT_LOAD.last_restart_at = now
         if GPT_LOAD.proc is not None and GPT_LOAD.proc.poll() is None:
             old = GPT_LOAD.proc
         else:
             old = None
+            if GPT_LOAD.proc is not None:
+                try:
+                    GPT_LOAD.last_exit_code = int(GPT_LOAD.proc.poll())  # type: ignore[arg-type]
+                except Exception:
+                    pass
         GPT_LOAD.proc = None
 
     if old is not None:
@@ -413,6 +430,25 @@ class Handler(BaseHTTPRequestHandler):
         _start_gpt_load_once()
 
         try:
+            # If gpt-load is still booting, don't thrash with restarts.
+            with GPT_LOAD.lock:
+                started_at = GPT_LOAD.last_started_at
+                restart_count = GPT_LOAD.restart_count
+                last_probe_ok_at = GPT_LOAD.last_probe_ok_at
+            if not _wait_for_tcp(GPT_LOAD_INTERNAL_HOST, GPT_LOAD_INTERNAL_PORT, timeout_s=2.0):
+                # If it's within the startup grace window, return a friendly 503.
+                if started_at is not None and (_now() - started_at) < float(GPT_LOAD_STARTUP_GRACE_S):
+                    self._send_json(
+                        503,
+                        {
+                            "error": "gpt-load starting",
+                            "detail": "gpt-load port not ready yet",
+                            "gpt_load_restart_count": restart_count,
+                            "gpt_load_last_probe_ok_at": last_probe_ok_at,
+                        },
+                    )
+                    return
+
             url = urllib.parse.urlparse(self.path)
             target_path = url.path or "/"
             if url.query:
@@ -467,6 +503,7 @@ class Handler(BaseHTTPRequestHandler):
                 running = bool(GPT_LOAD.proc is not None and GPT_LOAD.proc.poll() is None)
                 last_probe_ok_at = GPT_LOAD.last_probe_ok_at
                 restart_count = GPT_LOAD.restart_count
+                started_at = GPT_LOAD.last_started_at
             payload = {
                 "error": "gpt-load proxy failed",
                 "detail": str(e),
@@ -478,8 +515,9 @@ class Handler(BaseHTTPRequestHandler):
                 "gpt_load_log_tail": _tail_text("/tmp/gpt-load.log", max_bytes=8_000)[-8_000:],
                 "hint": "Set HF Space Secret GPT_LOAD_AUTH_KEY and (recommended) GPT_LOAD_DATABASE_DSN.",
             }
-            # If the port is refusing or timing out, restart in the background.
-            threading.Thread(target=_restart_gpt_load, args=(f"proxy error: {e}",), daemon=True).start()
+            # Restart only if we're well past startup grace; avoid restart storms.
+            if started_at is None or (_now() - started_at) >= float(GPT_LOAD_STARTUP_GRACE_S):
+                threading.Thread(target=_restart_gpt_load, args=(f"proxy error: {e}",), daemon=True).start()
             self._send_json(502, payload)
 
     def do_HEAD(self) -> None:  # noqa: N802
@@ -513,6 +551,9 @@ class Handler(BaseHTTPRequestHandler):
                 db_summary = _summarize_database_dsn(
                     (os.getenv("GPT_LOAD_DATABASE_DSN") or os.getenv("DATABASE_DSN") or "").strip()
                 )
+                # Useful for diagnosing restart storms / persistence issues.
+                started_at = GPT_LOAD.last_started_at
+                uptime_s = (_now() - started_at) if started_at is not None else None
                 payload.update(
                     {
                         "gpt_load_running": bool(GPT_LOAD.proc is not None and GPT_LOAD.proc.poll() is None),
@@ -520,6 +561,9 @@ class Handler(BaseHTTPRequestHandler):
                         "gpt_load_start_error": GPT_LOAD.last_start_error,
                         "gpt_load_restart_count": GPT_LOAD.restart_count,
                         "gpt_load_last_probe_ok_at": GPT_LOAD.last_probe_ok_at,
+                        "gpt_load_started_at": started_at,
+                        "gpt_load_uptime_s": uptime_s,
+                        "gpt_load_exit_code": GPT_LOAD.last_exit_code,
                         "gpt_load_db_mode": db_summary["mode"],
                         "gpt_load_db_host": db_summary["host"],
                         "gpt_load_db_name": db_summary["db"],

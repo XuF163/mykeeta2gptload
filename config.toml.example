@@ -19,8 +19,11 @@
 #     - GPT_LOAD_AUTH_KEY
 
 [email]
-# gptmail (default) / duckmail
-provider = "gptmail"
+# Provider options: gptmail / duckmail
+# Leave empty for auto:
+# - if `duckmail_apikey` is set -> duckmail
+# - otherwise -> gptmail
+provider = ""
 
 [gptmail]
 api_base = "https://mail.chatgpt.org.uk"

@@ -8,15 +8,28 @@
 #   - Optional GPT-Load key auto-sync
 #
 # Important:
-# - GPTMail is the only supported email provider in this trimmed repo.
+# - Supported email providers: GPTMail, DuckMail
 # - Secrets/endpoints can be provided via environment variables (recommended for Docker):
+#     - EMAIL_PROVIDER
 #     - GPTMAIL_API_KEY
+#     - duckmail_apikey
+#     - DUCKMAIL_API_BASE
 #     - GPT_LOAD_BASE_URL
 #     - GPT_LOAD_GROUP_NAME
 #     - GPT_LOAD_AUTH_KEY
 
+[email]
+# gptmail (default) / duckmail
+provider = "gptmail"
+
 [gptmail]
 api_base = "https://mail.chatgpt.org.uk"
+api_key = ""
+prefix = ""
+domains = []
+
+[duckmail]
+api_base = "https://api.duckmail.sbs"
 api_key = ""
 prefix = ""
 domains = []

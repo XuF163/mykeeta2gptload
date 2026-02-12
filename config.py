@@ -137,8 +137,27 @@ BROWSER_HEADLESS = _as_bool(_browser.get("headless", False), False)
 
 
 # -------------------- Email provider --------------------
-# Only GPTMail is supported (CloudMail/KYX was removed to keep the project small).
-EMAIL_PROVIDER = "gptmail"
+# Supported providers: gptmail, duckmail
+_email = _cfg.get("email", {}) if isinstance(_cfg, dict) else {}
+EMAIL_PROVIDER = (
+    _as_str(os.getenv("EMAIL_PROVIDER"), "").strip().lower()
+    or _as_str(_email.get("provider", ""), "").strip().lower()
+)
+if not EMAIL_PROVIDER:
+    # If user sets duckmail_apikey only, auto-switch to duckmail.
+    duckmail_key_hint = (
+        _as_str(os.getenv("duckmail_apikey"), "").strip()
+        or _as_str(os.getenv("DUCKMAIL_APIKEY"), "").strip()
+        or _as_str(os.getenv("DUCKMAIL_API_KEY"), "").strip()
+        or _as_str((_cfg.get("duckmail", {}) or {}).get("api_key"), "").strip()
+    )
+    if duckmail_key_hint:
+        EMAIL_PROVIDER = "duckmail"
+    else:
+        EMAIL_PROVIDER = "gptmail"
+if EMAIL_PROVIDER not in ("gptmail", "duckmail"):
+    _log_config("WARNING", "email", f"未知邮箱服务: {EMAIL_PROVIDER}, 已回退到 gptmail")
+    EMAIL_PROVIDER = "gptmail"
 
 # GPTMail (supports env override for Docker deployments)
 _gptmail = _cfg.get("gptmail", {}) if isinstance(_cfg, dict) else {}
@@ -151,6 +170,29 @@ GPTMAIL_DOMAINS = _gptmail.get("domains", []) if isinstance(_gptmail.get("domain
 def get_random_gptmail_domain() -> str:
     if isinstance(GPTMAIL_DOMAINS, list) and GPTMAIL_DOMAINS:
         return random.choice(GPTMAIL_DOMAINS)
+    return ""
+
+
+# DuckMail (supports env override for Docker deployments)
+_duckmail = _cfg.get("duckmail", {}) if isinstance(_cfg, dict) else {}
+DUCKMAIL_API_BASE = (
+    _as_str(os.getenv("DUCKMAIL_API_BASE"), "").strip().rstrip("/")
+    or _as_str(_duckmail.get("api_base", "https://api.duckmail.sbs"), "https://api.duckmail.sbs").strip().rstrip("/")
+)
+# Primary requested env var name: duckmail_apikey (lowercase)
+DUCKMAIL_API_KEY = (
+    _as_str(os.getenv("duckmail_apikey"), "").strip()
+    or _as_str(os.getenv("DUCKMAIL_APIKEY"), "").strip()
+    or _as_str(os.getenv("DUCKMAIL_API_KEY"), "").strip()
+    or _as_str(_duckmail.get("api_key", ""), "").strip()
+)
+DUCKMAIL_PREFIX = _as_str(_duckmail.get("prefix", ""), "")
+DUCKMAIL_DOMAINS = _duckmail.get("domains", []) if isinstance(_duckmail.get("domains", []), list) else []
+
+
+def get_random_duckmail_domain() -> str:
+    if isinstance(DUCKMAIL_DOMAINS, list) and DUCKMAIL_DOMAINS:
+        return random.choice(DUCKMAIL_DOMAINS)
     return ""
 
 

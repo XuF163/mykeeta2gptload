@@ -10,7 +10,9 @@ This repo includes a `docker-compose.yml` that starts:
 
 Recommended: use a `.env` file (see `.env.example`) or set env vars in your shell:
 
-- `GPTMAIL_API_KEY` (required)
+- `EMAIL_PROVIDER` (optional: `gptmail` default; auto `duckmail` if `duckmail_apikey` is set)
+- `GPTMAIL_API_KEY` (required when provider=`gptmail`)
+- `duckmail_apikey` (required when provider=`duckmail`)
 - `GPT_LOAD_AUTH_KEY` (required if you want auto-import into gpt-load)
 - `GPT_LOAD_GROUP_NAME` (optional, default `#pinhaofan`)
 - `POSTGRES_PASSWORD` (optional, default `123456`)
@@ -48,7 +50,9 @@ If you want it to run continuously, set one of the following env vars:
 
 Set env vars in Space Settings -> Variables / Secrets:
 
-- `GPTMAIL_API_KEY` (required)
+- `EMAIL_PROVIDER` (optional)
+- `GPTMAIL_API_KEY` (required when provider=`gptmail`)
+- `duckmail_apikey` (required when provider=`duckmail`)
 - `GPT_LOAD_AUTH_KEY` (optional, for GPT-Load sync)
 - `GPT_LOAD_BASE_URL` (optional)
 - `GPT_LOAD_GROUP_NAME` (optional)
@@ -59,13 +63,20 @@ Set env vars in Space Settings -> Variables / Secrets:
 4) Deploy using the included `Dockerfile`
 5) Set environment variables in Zeabur (Settings -> Environment Variables):
 
-- `GPTMAIL_API_KEY` (required)
+- `EMAIL_PROVIDER` (optional)
+- `GPTMAIL_API_KEY` (required when provider=`gptmail`)
+- `duckmail_apikey` (required when provider=`duckmail`)
 - `GPT_LOAD_BASE_URL` (optional)
 - `GPT_LOAD_GROUP_NAME` (optional)
 - `GPT_LOAD_AUTH_KEY` (optional)
 
 ```bash
-# required
+# Email provider (choose one)
+EMAIL_PROVIDER=duckmail
+duckmail_apikey=dk_xxx
+
+# or
+EMAIL_PROVIDER=gptmail
 GPTMAIL_API_KEY=sk-xxxx
 
 # optional (GPT-Load)

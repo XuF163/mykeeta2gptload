@@ -225,7 +225,7 @@ class GPTMailService:
             for item in items:
                 subj = str(item.get("subject") or "")
                 content = str(item.get("content") or "")
-                last_time = str(item.get("created_at") or item.get("date") or "") or last_time
+                last_time = str(item.get("created_at") or item.get("date") or item.get("time") or "") or last_time
                 code = self._extract_code(subj) or self._extract_code(content)
                 if code:
                     log.success(f"GPTMail 验证码获取成功: {code}")

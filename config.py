@@ -161,7 +161,7 @@ if EMAIL_PROVIDER not in ("gptmail", "duckmail"):
 
 # GPTMail (supports env override for Docker deployments)
 _gptmail = _cfg.get("gptmail", {}) if isinstance(_cfg, dict) else {}
-GPTMAIL_API_BASE = _as_str(_gptmail.get("api_base", "https://mail.chatgpt.org.uk"), "https://mail.chatgpt.org.uk")
+GPTMAIL_API_BASE = _as_str(_gptmail.get("api_base", "https://xwwww-gr.hf.space"), "https://xwwww-gr.hf.space")
 GPTMAIL_API_KEY = _as_str(os.getenv("GPTMAIL_API_KEY"), "") or _as_str(_gptmail.get("api_key", ""), "")
 GPTMAIL_PREFIX = _as_str(_gptmail.get("prefix", ""), "")
 GPTMAIL_DOMAINS = _gptmail.get("domains", []) if isinstance(_gptmail.get("domains", []), list) else []

@@ -137,11 +137,11 @@ class GPTMailService:
         return data
 
     def generate_email(self, *, prefix: str | None = None, domain: str | None = None) -> tuple[str | None, str | None]:
-        url = f"{self.api_base}/api/generate-email"
         try:
             headers = dict(self.headers)
             if prefix or domain:
-                payload: dict[str, str] = {}
+                url = f"{self.api_base}/custom"
+                payload: dict[str, str] = {"provider": "gptmail"}
                 if prefix:
                     payload["prefix"] = prefix
                 if domain:
@@ -149,7 +149,8 @@ class GPTMailService:
                 headers["Content-Type"] = "application/json"
                 r = self._session.post(url, headers=headers, json=payload, timeout=REQUEST_TIMEOUT)
             else:
-                r = self._session.get(url, headers=headers, timeout=REQUEST_TIMEOUT)
+                url = f"{self.api_base}/generate"
+                r = self._session.get(url, params={"provider": "gptmail"}, headers=headers, timeout=REQUEST_TIMEOUT)
 
             data = self._parse_json_response(r)
             if data.get("success"):
@@ -163,25 +164,16 @@ class GPTMailService:
             return None, str(e)
 
     def get_emails(self, email: str) -> tuple[list[dict[str, Any]] | None, str | None]:
-        # GPTMail API endpoint naming has changed over time:
-        # - newer: /api/emails
-        # - older: /api/get-emails
-        urls = [f"{self.api_base}/api/emails", f"{self.api_base}/api/get-emails"]
+        url = f"{self.api_base}/emails/{email}"
         try:
-            last_err = None
-            for url in urls:
-                try:
-                    r = self._session.get(
-                        url, headers=self.headers, params={"email": email}, timeout=REQUEST_TIMEOUT
-                    )
-                    data = self._parse_json_response(r)
-                    if data.get("success"):
-                        items = (data.get("data") or {}).get("emails") or []
-                        return items if isinstance(items, list) else [], None
-                    last_err = str(data.get("error") or data.get("message") or "get-emails failed")
-                except Exception as e:
-                    last_err = str(e)
-            return None, last_err or "get-emails failed"
+            r = self._session.get(
+                url, headers=self.headers, params={"provider": "gptmail"}, timeout=REQUEST_TIMEOUT
+            )
+            data = self._parse_json_response(r)
+            if data.get("success"):
+                items = (data.get("data") or {}).get("emails") or []
+                return items if isinstance(items, list) else [], None
+            return None, str(data.get("error") or data.get("message") or "get-emails failed")
         except Exception as e:
             return None, str(e)
 

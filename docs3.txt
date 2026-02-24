@@ -1,0 +1,341 @@
+# 统一临时邮箱 API (连接池版)
+
+统一多渠道临时邮箱服务，提供一致的 REST API 接口，无需认证。
+
+- 默认端口：`7860`（Huggingface Spaces 默认端口，可用 `PORT` 覆盖）
+- 文档地址：`https://xwwww-gr.hf.space/docs`
+
+## 重要行为说明
+
+1. 本服务是“无状态”的：不要依赖“同一客户端/同一 IP 的会话粘性”。
+2. `provider=gptmail` 每次请求都会使用独立的 incognito 浏览器上下文隔离会话，避免不同用户共享同一个邮箱。
+3. `GET /emails/:email` 可能会返回较大的 `content`；如只需要列表元信息，可忽略该字段，或用 `GET /emails/:email/:index` 拉取单封。
+4. 高并发下如果浏览器池已满，接口可能返回 `503`（例如 `获取浏览器实例超时` / `等待队列已满`），请客户端按需重试并做退避。
+
+## 快速开始
+
+```bash
+npm install
+PORT=7860 node unified-api.js
+```
+
+示例里使用：
+
+```bash
+BASE_URL="https://xwwww-gr.hf.space"
+```
+
+## 响应格式
+
+成功：
+
+```json
+{
+  "success": true,
+  "data": { "...": "..." },
+  "provider": { "id": "gptmail", "name": "GPTMail" }
+}
+```
+
+失败：
+
+```json
+{ "success": false, "error": "..." }
+```
+
+> `provider` 字段仅在部分接口中返回（例如大多数业务接口会带上）。
+
+## 支持的提供商
+
+| id | name | description |
+|---|---|---|
+| gptmail | GPTMail | mail.chatgpt.org.uk 临时邮箱 |
+| linshiyouxiang | 临时邮箱 | linshiyouxiang.net 临时邮箱 |
+
+默认提供商：`gptmail`。
+
+---
+
+## API
+
+### 1. API 信息
+
+```http
+GET /
+```
+
+响应示例（字段以实际返回为准）：
+
+```json
+{
+  "success": true,
+  "data": {
+    "name": "统一临时邮箱 API (连接池版)",
+    "version": "2.0.0",
+    "description": "支持高并发的多渠道临时邮箱服务",
+    "defaultProvider": "gptmail",
+    "poolConfig": {
+      "maxSize": 10,
+      "minSize": 2,
+      "idleTimeout": 120000,
+      "acquireTimeout": 30000
+    }
+  },
+  "providers": [
+    { "id": "gptmail", "name": "GPTMail", "description": "..." },
+    { "id": "linshiyouxiang", "name": "临时邮箱", "description": "..." }
+  ],
+  "endpoints": [
+    { "method": "GET", "path": "/docs", "description": "API 文档" }
+  ]
+}
+```
+
+---
+
+### 2. API 文档
+
+```http
+GET /docs
+```
+
+---
+
+### 3. 连接池状态
+
+```http
+GET /status
+```
+
+响应示例：
+
+```json
+{
+  "success": true,
+  "data": {
+    "pools": {
+      "gptmail": {
+        "total": 2,
+        "active": 0,
+        "idle": 2,
+        "waiting": 0,
+        "maxSize": 10,
+        "minSize": 2
+      }
+    },
+    "config": {
+      "maxSize": 10,
+      "minSize": 2,
+      "idleTimeout": 120000,
+      "acquireTimeout": 30000
+    }
+  }
+}
+```
+
+---
+
+### 4. 列出提供商
+
+```http
+GET /providers
+```
+
+响应示例：
+
+```json
+{
+  "success": true,
+  "data": {
+    "providers": [
+      { "id": "gptmail", "name": "GPTMail", "description": "..." },
+      { "id": "linshiyouxiang", "name": "临时邮箱", "description": "..." }
+    ],
+    "default": "gptmail"
+  }
+}
+```
+
+---
+
+### 5. 生成随机邮箱
+
+```http
+GET /generate?provider=...
+```
+
+示例：
+
+```bash
+curl "$BASE_URL/generate"
+curl "$BASE_URL/generate?provider=linshiyouxiang"
+```
+
+---
+
+### 6. 获取邮箱（当前页面分配）
+
+```http
+GET /email?provider=...
+```
+
+说明：
+
+- 对 `provider=gptmail`，由于请求级隔离，此接口通常每次都会得到不同邮箱。
+
+示例：
+
+```bash
+curl "$BASE_URL/email"
+```
+
+---
+
+### 7. 获取邮件列表
+
+```http
+GET /emails/:email?provider=...
+```
+
+说明：
+
+- 返回字段随提供商不同而不同。
+- GPTMail 通常会包含 `content`/`html_content`（体积可能较大）。
+- 临时邮箱（linshiyouxiang）通常只返回列表元信息（可能包含 `href`）。
+
+示例：
+
+```bash
+curl "$BASE_URL/emails/148d935a@jdcirym.shop"
+curl "$BASE_URL/emails/test@example.com?provider=linshiyouxiang"
+```
+
+响应示例（GPTMail）：
+
+```json
+{
+  "success": true,
+  "provider": { "id": "gptmail", "name": "GPTMail" },
+  "data": {
+    "email": "test@example.com",
+    "emails": [
+      {
+        "id": 123,
+        "from": "sender@example.com",
+        "subject": "验证码",
+        "time": "2026/2/23 21:09:27",
+        "content": "......",
+        "html_content": "<p>...</p>"
+      }
+    ],
+    "count": 1,
+    "empty": false
+  }
+}
+```
+
+---
+
+### 8. 获取单封邮件完整内容
+
+```http
+GET /emails/:email/:index?provider=...
+```
+
+示例：
+
+```bash
+curl "$BASE_URL/emails/148d935a@jdcirym.shop/0"
+```
+
+响应示例（GPTMail）：
+
+```json
+{
+  "success": true,
+  "provider": { "id": "gptmail", "name": "GPTMail" },
+  "data": {
+    "email": "test@example.com",
+    "index": 0,
+    "from": "sender@example.com",
+    "subject": "验证码",
+    "time": "2026/2/23 21:09:27",
+    "content": "您的验证码是 123456",
+    "contentHtml": "<p>您的验证码是 <b>123456</b></p>"
+  }
+}
+```
+
+---
+
+### 9. 自定义邮箱前缀
+
+```http
+POST /custom
+Content-Type: application/json
+
+{ "prefix": "myname", "provider": "gptmail" }
+```
+
+示例：
+
+```bash
+curl -X POST "$BASE_URL/custom" \
+  -H "Content-Type: application/json" \
+  -d '{"prefix":"myname"}'
+```
+
+---
+
+### 10. 刷新收件箱
+
+```http
+POST /refresh
+Content-Type: application/json
+
+{ "email": "your@email.com", "provider": "gptmail" }
+```
+
+说明：
+
+- `provider=gptmail` 时 `email` 必填。
+- 其他提供商可省略 `email`（刷新其当前页面收件箱）。
+
+---
+
+### 11. 清空收件箱
+
+```http
+POST /clear
+Content-Type: application/json
+
+{ "email": "your@email.com", "provider": "gptmail" }
+```
+
+说明同上。
+
+---
+
+### 12. 页面截图（调试）
+
+```http
+GET /screenshot?provider=...
+```
+
+---
+
+## 兼容旧版路由（不推荐）
+
+- `GET /generate/:provider`
+- `GET /email/:provider`
+
+## 环境变量
+
+| 变量 | 默认值 | 说明 |
+|---|---:|---|
+| PORT | 7860 | 服务端口 |
+| POOL_MAX_SIZE | 10 | 最大浏览器实例数 |
+| POOL_MIN_SIZE | 2 | 最小浏览器实例数 |
+| POOL_IDLE_TIMEOUT | 120000 | 空闲超时(ms) |
+| POOL_ACQUIRE_TIMEOUT | 30000 | 获取实例超时(ms) |
+| POOL_MAX_WAITING | 200 | 等待队列最大长度（超出直接拒绝） |

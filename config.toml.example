@@ -26,7 +26,7 @@
 provider = ""
 
 [gptmail]
-api_base = "https://mail.chatgpt.org.uk"
+api_base = "https://xwwww-gr.hf.space"
 api_key = ""
 prefix = ""
 domains = []
